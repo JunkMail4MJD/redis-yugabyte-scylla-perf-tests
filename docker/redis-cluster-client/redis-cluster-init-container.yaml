@@ -1,0 +1,49 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: redis-cluster-init
+  labels:
+    name: redis-cluster-init
+spec:
+  ports:
+  - protocol: TCP
+    port: 8443
+    targetPort: 8443
+  selector:
+    app: redis-cluster-init
+  type: NodePort
+  sessionAffinity: None
+---
+kind: Deployment
+apiVersion: extensions/v1beta1
+metadata:
+  name: redis-cluster-init
+  labels:
+    app: redis-cluster-init
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-cluster-init
+  template:
+    metadata:
+      labels:
+        app: redis-cluster-init
+    spec:
+      containers:
+      - name: redis-cluster-init
+        image: junkmail4mjd/redis-cluster-init-container:v0.0.1
+        ports:
+        - containerPort: 8443
+          protocol: TCP
+        imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600

@@ -1,0 +1,297 @@
+#!/usr/bin/env python
+# Copyright (c) YugaByte, Inc.
+
+import argparse
+import subprocess
+import os
+import json
+import sys
+import time
+import re
+
+YB_NETWORK_NAME = "yb-net"
+YB_DOCKER_IMAGE = "yugabytedb/yugabyte:latest"
+CONTAINER_CONFIG_CMD = 'docker inspect -f "{{json .ContainerConfig.%s}}" %s'
+CONTAINER_IMAGE_FIND = 'docker images %s --format "{{.ID}}"'
+
+
+class YBDockerControl():
+    REPLICATION_FACTOR_OPTIMAL = 3
+    NUM_SHARDS_PER_TSERVER = 2
+    YB_MASTER_FORMAT = "yb-master-n{}"
+    YB_MASTER_PORT = "7100"
+    YB_MASTER_UI_PORT = 7000
+    YB_MASTER_FORMAT_WITH_PORT = "{}:{}".format(YB_MASTER_FORMAT, YB_MASTER_PORT)
+    YB_TSERVER_FORMAT = "yb-tserver-n{}"
+    YB_TSERVER_PORT = "9100"
+    YB_TSERVER_UI_PORT = 9000
+    CLIENT_PORTS = [9042, 6379]
+    YB_TSERVER_FORMAT_WITH_PORT = "{}:{}".format(YB_TSERVER_FORMAT, YB_TSERVER_PORT)
+    CONTAINER_SEARCH_CMD = 'docker ps -af "name=yb-" -q'
+    CONTAINER_INFO_CMD = 'docker inspect --format "{{ .ID }}|{{ .Name }}|' \
+                         '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}|' \
+                         '{{.State.Status}}|{{.State.Pid}}|{{.State.StartedAt}}" %s'
+    WAIT_TIMEOUT = 15
+
+    def __init__(self):
+        self.args = None
+        self.parser = None
+        self.containers = []
+        self.container_count = 0
+        self.num_master = 0
+        self.num_tservers = 0
+        self.verify_docker()
+        self.setup_yb_network()
+        self.setup_cli()
+
+        self.volumes = self.read_container_config("Volumes")
+        self.working_dir = self.read_container_config("WorkingDir")
+
+    @staticmethod
+    def verify_docker():
+        result = subprocess.check_output(['docker', 'info'])
+        if 'Error' in result:
+            sys.exit("Docker daemon not running")
+        result = subprocess.check_output(CONTAINER_IMAGE_FIND % YB_DOCKER_IMAGE,
+                                         shell=True)
+        if not result:
+            subprocess.check_call(['docker', 'pull', YB_DOCKER_IMAGE])
+
+    @staticmethod
+    def setup_yb_network():
+        try:
+            # Create YugaByte network bridge if not already exists
+            result = subprocess.check_output(['docker', 'network', 'ls', '-q',
+                                              '--filter', 'name={}'.format(YB_NETWORK_NAME)])
+            if result:
+                return True
+            subprocess.check_output(['docker', 'network', 'create',
+                                     '-d', 'bridge', YB_NETWORK_NAME])
+            return True
+        except subprocess.CalledProcessError:
+            sys.exit("Unable to create docker network {}".format(YB_NETWORK_NAME))
+
+    @staticmethod
+    def destroy_yb_network():
+        try:
+            result = subprocess.check_output(['docker', 'network', 'ls', '-q',
+                                              '--filter', 'name={}'.format(YB_NETWORK_NAME)])
+            if result:
+                subprocess.check_output(['docker', 'network', 'rm', YB_NETWORK_NAME])
+        except subprocess.CalledProcessError:
+            sys.exit("Unable to destroy docker network {}".format(YB_NETWORK_NAME))
+
+
+    @staticmethod
+    def read_container_config(config_name):
+        try:
+            config = subprocess.check_output(CONTAINER_CONFIG_CMD %
+                                             (config_name, YB_DOCKER_IMAGE),
+                                             shell=True)
+            return json.loads(config.strip())
+        except subprocess.CalledProcessError:
+            sys.exit("Unable to fetch container config {}".format(config_name))
+
+    def fetch_containers(self):
+        try:
+            config = subprocess.check_output(self.CONTAINER_SEARCH_CMD, shell=True)
+            universe_containers = filter(None, config.strip().split("\n"))
+            self.containers = []
+            for container_id in universe_containers:
+                container_info = subprocess.check_output(self.CONTAINER_INFO_CMD % container_id,
+                                                         shell=True)
+                # Docker inspect adds a leading slash to the container name, we would just remove
+                # that so we have nicer name
+                self.containers.append(container_info.strip().replace("/yb-", "yb-"))
+            self.container_count = len(self.containers)
+            self.master_nodes = [node_info for node_info in self.containers
+                                 if 'master' in node_info]
+            self.tserver_nodes = [node_info for node_info in self.containers
+                                  if 'tserver' in node_info]
+            self.num_master = len(self.master_nodes)
+            self.num_tservers = len(self.tserver_nodes)
+
+            if self.args.command == 'create' and self.container_count == 0:
+                self.master_addrs = [self.YB_MASTER_FORMAT_WITH_PORT.format(i)
+                                     for i in xrange(1, self.args.rf + 1)]
+            else:
+                self.master_addrs = ["{}:{}".format(node_info.split("|")[1], self.YB_MASTER_PORT)
+                                     for node_info in self.master_nodes]
+        except subprocess.CalledProcessError:
+            sys.exit("Unable to fetch running YugaByte containers")
+
+    def setup_cli(self):
+        def _add_shared_args(parser):
+            parser.add_argument(
+                '--num_shards_per_tserver', type=int, default=self.NUM_SHARDS_PER_TSERVER,
+                help='Number of shards (tablets) to create per tablet server for each table.')
+
+        self.parser = argparse.ArgumentParser(description='YugaByte Docker Container Control')
+        subparsers = self.parser.add_subparsers(help='Commands')
+        create_subparser = subparsers.add_parser('create', help='Create YugaByte Cluster')
+        create_subparser.set_defaults(command='create')
+        create_subparser.add_argument('--rf', type=int, default=self.REPLICATION_FACTOR_OPTIMAL,
+                                      help='Replication Factor')
+        _add_shared_args(create_subparser)
+
+        status_subparser = subparsers.add_parser('status',
+                                                 help='Check YugaByte Cluster status')
+        status_subparser.set_defaults(command='status')
+
+        destroy_subparser = subparsers.add_parser('destroy',
+                                                  help='Destroy YugaByte Cluster')
+        destroy_subparser.set_defaults(command='destroy')
+
+        add_node_subparser = subparsers.add_parser('add_node',
+                                                   help='Add a new YugaByte Cluster Node')
+        add_node_subparser.set_defaults(command='add_node')
+        _add_shared_args(add_node_subparser)
+
+        remove_node_subparser = subparsers.add_parser('remove_node',
+                                                      help='Stop a YugaByte Cluster Node')
+        remove_node_subparser.add_argument("node", type=str, help='Node ID to remove')
+        remove_node_subparser.set_defaults(command='remove_node')
+
+    def start_cluster(self, server_type, node_id):
+        base_cmd = ['--net', YB_NETWORK_NAME, '--detach']
+        server_cmds = [YB_DOCKER_IMAGE,
+                       os.path.join(self.working_dir, 'bin', server_type),
+                       '--fs_data_dirs={}'.format(",".join(self.volumes))]
+        if bool(os.getenv('YB_DISABLE_CALLHOME')):
+            server_cmds.extend(['--callhome_enabled=false'])
+
+        exposed_ports = []
+        if server_type == 'yb-master':
+            container_name = self.YB_MASTER_FORMAT.format(node_id)
+            container_with_port = self.YB_MASTER_FORMAT_WITH_PORT.format(node_id)
+            server_cmds.extend([
+                '--replication_factor={}'.format(self.args.rf),
+                '--master_addresses={}'.format(",".join(self.master_addrs)),
+                '--rpc_bind_addresses={}'.format(container_with_port),
+                '--yb_num_shards_per_tserver={}'.format(self.args.num_shards_per_tserver)])
+            # we expose master ui port for first node alone, exposing other
+            # nodes to host would create a port conflict.
+            if node_id == 1:
+                exposed_ports.append(self.YB_MASTER_UI_PORT)
+
+        elif server_type == 'yb-tserver':
+            container_name = self.YB_TSERVER_FORMAT.format(node_id)
+            container_with_port = self.YB_TSERVER_FORMAT_WITH_PORT.format(node_id)
+            server_cmds.extend([
+                '--tserver_master_addrs={}'.format(",".join(self.master_addrs)),
+                '--rpc_bind_addresses={}'.format(container_with_port),
+                '--yb_num_shards_per_tserver={}'.format(self.args.num_shards_per_tserver)])
+
+            # we expose tserver ui, cassandra and redis port for first node alone,
+            # exposing other nodes to host would create a port conflict.
+            if node_id == 1:
+                exposed_ports.append(self.YB_TSERVER_UI_PORT)
+                exposed_ports.extend(self.CLIENT_PORTS)
+
+        docker_cmd = ['docker', 'run', '--name', container_name, '--privileged', '--hostname',
+                      container_name]
+        for port in exposed_ports:
+            docker_cmd.extend(['-p', '{}:{}'.format(port, port)])
+        docker_cmd.extend(base_cmd)
+        docker_cmd.extend(server_cmds)
+        print ' '.join(docker_cmd)
+        print "Adding node {}".format(container_name)
+        subprocess.check_output(docker_cmd)
+
+    def create_clusters(self):
+        if self.container_count > 0:
+            sys.exit("{} YugaByte nodes found".format(self.container_count))
+
+        for server_type in ['yb-master', 'yb-tserver']:
+            for node_id in xrange(1, self.args.rf + 1):
+                self.start_cluster(server_type, node_id)
+
+    def cluster_status(self):
+        if len(self.containers) == 0:
+            sys.exit("YugaByte containers are not running")
+
+        print "{:<10} {:<10} {:<20} {:<25} {:<15} {:<20}".format('PID', 'Type', 'Node',
+                                                                'URL', 'Status', 'Started At')
+        for info_hash in self.containers:
+            name, ip, status, pid, started_at = info_hash.split("|")[1:]
+            node_type = filter(None, re.split('.*-(.*)-.*', name))[0]
+            ui_port = self.YB_MASTER_UI_PORT if node_type == "master" else self.YB_TSERVER_UI_PORT
+            node_ui_host = "http://{}:{}".format(ip, ui_port) if status == 'running' else None
+            state = 'Running' if 'running' in status else 'Stopped'
+            print "{:<10} {:<10} {:<20} {:<25} {:<15} {:<20}".format(pid, node_type, name,
+                                                                    node_ui_host, state, started_at)
+
+    def destroy_cluster(self):
+        if len(self.containers) == 0:
+            sys.exit("No YugaByte nodes to destroy")
+
+        for info_hash in self.containers:
+            id, name = info_hash.split("|")[:2]
+            print "Destroying {}".format(name)
+            subprocess.check_output(['docker', 'rm', id, '--force'])
+        self.destroy_yb_network()
+
+    def wait_for_cluster(self):
+        wait_count = 0
+        while True:
+            try:
+                docker_cmd = ['docker', 'exec', '-it',
+                              self.YB_MASTER_FORMAT.format(1),
+                              '{}/bin/yb-admin --master_addresses {} list_all_tablet_servers'
+                                  .format(self.working_dir, ",".join(self.master_addrs))]
+                result = subprocess.check_output(" ".join(docker_cmd), shell=True)
+
+                if result.count("yb-tserver-") == self.args.rf:
+                    docker_cmd = ['docker', 'exec', '-it',
+                                  self.YB_MASTER_FORMAT.format(1),
+                                  '{}/bin/yb-admin --master_addresses {} '
+                                  '--yb_num_shards_per_tserver={} '
+                                  'setup_redis_table'.format(
+                                      self.working_dir, ",".join(self.master_addrs),
+                                      self.args.num_shards_per_tserver)]
+                    result = subprocess.check_output(" ".join(docker_cmd), shell=True)
+                    if "created." in result:
+                        return
+            except subprocess.CalledProcessError:
+                pass
+            if wait_count >= self.WAIT_TIMEOUT:
+                sys.exit("Timed out waiting for YugaByte clusters to come up.")
+                return
+            wait_count += 1
+            time.sleep(1)
+
+    def add_node(self):
+        new_node_id = self.num_tservers + 1
+        self.start_cluster("yb-tserver", new_node_id)
+
+    def remove_node(self):
+        node_name = self.YB_TSERVER_FORMAT.format(self.args.node)
+        node = [node_info for node_info in self.tserver_nodes
+                if node_name in node_info]
+        if len(node) == 0:
+            sys.exit("Provided node {} not found".format(node_name))
+
+        node_id = node[0].split("|")[0]
+        print "Stopping node : {}".format(node_name)
+        subprocess.check_output(['docker', 'stop', node_id])
+
+    def run(self):
+        self.args = self.parser.parse_args()
+        self.fetch_containers()
+
+        if self.args.command == 'create':
+            self.create_clusters()
+            self.wait_for_cluster()
+            self.fetch_containers()
+            self.cluster_status()
+        elif self.args.command == 'status':
+            self.cluster_status()
+        elif self.args.command == 'destroy':
+            self.destroy_cluster()
+        elif self.args.command == 'add_node':
+            self.add_node()
+        elif self.args.command == 'remove_node':
+            self.remove_node()
+
+if __name__ == "__main__":
+    YBDockerControl().run()

@@ -1,0 +1,51 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: redis
+  labels:
+    name: redis
+spec:
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+  selector:
+    app: yb-tserver
+  type: ClusterIP
+  sessionAffinity: None
+---
+kind: Deployment
+apiVersion: extensions/v1beta1
+metadata:
+  name: standalone-redis
+  labels:
+    app: standalone-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: standalone-redis
+  template:
+    metadata:
+      labels:
+        app: standalone-redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:4.0
+        ports:
+        - containerPort: 6379
+          protocol: TCP
+        terminationMessagePath: "/dev/termination-log"
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600

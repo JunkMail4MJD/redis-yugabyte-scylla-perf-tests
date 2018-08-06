@@ -1,0 +1,59 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: redis
+  labels:
+    name: redis
+spec:
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+  selector:
+    app: redis
+  type: ClusterIP
+  sessionAffinity: None
+---
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: redis
+  labels:
+    app: redis
+spec:
+  serviceName: redis
+  replicas: 6
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:4.0
+        imagePullPolicy: IfNotPresent
+        command:
+          - "/usr/local/bin/redis-server"
+          - "--cluster-enabled yes"
+          - "--appendonly yes"
+        ports:
+        - containerPort: 6379
+          name: redis
+        - containerPort: 16379
+          name: cluster-rpc
+        volumeMounts:
+        - name: datadir
+          mountPath: /mnt/data0
+  updateStrategy:
+    type: RollingUpdate
+  volumeClaimTemplates:
+  - metadata:
+      name: datadir
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi

@@ -1,0 +1,125 @@
+kind: Service
+apiVersion: v1
+metadata:
+  name: cl-0
+  labels:
+    name: cl-0
+spec:
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+    name: redis
+  - protocol: TCP
+    port: 16379
+    targetPort: 16379
+    name: clusterrpc
+  selector:
+    statefulset.kubernetes.io/pod-name: redis-0
+  type: ClusterIP
+  sessionAffinity: None
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: cl-1
+  labels:
+    name: cl-1
+spec:
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+    name: redis
+  - protocol: TCP
+    port: 16379
+    targetPort: 16379
+    name: clusterrpc
+  selector:
+    statefulset.kubernetes.io/pod-name: redis-1
+  type: ClusterIP
+  sessionAffinity: None
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: cl-2
+  labels:
+    name: cl-2
+spec:
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+    name: redis
+  - protocol: TCP
+    port: 16379
+    targetPort: 16379
+    name: clusterrpc
+  selector:
+    statefulset.kubernetes.io/pod-name: redis-2
+  type: ClusterIP
+  sessionAffinity: None
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: cl-3
+  labels:
+    name: cl-3
+spec:
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+    name: redis
+  - protocol: TCP
+    port: 16379
+    targetPort: 16379
+    name: clusterrpc
+  selector:
+    statefulset.kubernetes.io/pod-name: redis-3
+  type: ClusterIP
+  sessionAffinity: None
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: cl-4
+  labels:
+    name: cl-4
+spec:
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+    name: redis
+  - protocol: TCP
+    port: 16379
+    targetPort: 16379
+    name: clusterrpc
+  selector:
+    statefulset.kubernetes.io/pod-name: redis-4
+  type: ClusterIP
+  sessionAffinity: None
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: cl-5
+  labels:
+    name: cl-5
+spec:
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+    name: redis
+  - protocol: TCP
+    port: 16379
+    targetPort: 16379
+    name: clusterrpc
+  selector:
+    statefulset.kubernetes.io/pod-name: redis-5
+  type: ClusterIP
+  sessionAffinity: None
